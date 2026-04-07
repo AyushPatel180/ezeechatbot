@@ -11,10 +11,12 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
 
 # Copy requirements
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-streamlit.txt .
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-streamlit.txt
 
 # Copy application code
 COPY app/ ./app/
+COPY streamlit_app.py ./streamlit_app.py
 
 # Expose port
 EXPOSE 8000

@@ -147,9 +147,17 @@ async def stream_chat_response(
 
         prompt = _build_prompt(messages)
         response_stream = await Settings.llm.astream_complete(prompt)
+        previous_text = ""
 
         async for token in response_stream:
-            delta = getattr(token, "delta", None) or getattr(token, "text", "")
+            delta = getattr(token, "delta", None)
+            if not delta:
+                current_text = getattr(token, "text", "") or ""
+                if current_text.startswith(previous_text):
+                    delta = current_text[len(previous_text):]
+                else:
+                    delta = current_text
+                previous_text = current_text
             if delta:
                 output_tokens += count_tokens(delta)
                 yield f"data: {json.dumps({'delta': delta})}\n\n"

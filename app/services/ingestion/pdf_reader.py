@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - optional dependency
 class PDFReader:
     """Extract text from base64-encoded PDF with page-level metadata."""
 
-    def _load_pdf_bytes(self, pdf_bytes: bytes, bot_id: str) -> List[Document]:
+    def _load_pdf_bytes(self, pdf_bytes: bytes, bot_id: str, api_key: str | None = None) -> List[Document]:
         pdf_stream = io.BytesIO(pdf_bytes)
         documents = []
         with pdfplumber.open(pdf_stream) as pdf:
@@ -37,7 +37,7 @@ class PDFReader:
                         extraction_method = "ocr"
 
                 if self._should_run_vision(page, text, page_num):
-                    vision_text = extract_page_with_vision(page)
+                    vision_text = extract_page_with_vision(page, api_key=api_key)
                     merged_text = self._merge_page_text(text, vision_text)
                     if merged_text != text:
                         text = merged_text
@@ -101,7 +101,7 @@ class PDFReader:
             return base_text
         return f"{base_text}\n\n[visual extraction]\n{fallback_text}"
     
-    def load(self, base64_content: str, bot_id: str) -> List[Document]:
+    def load(self, base64_content: str, bot_id: str, api_key: str | None = None) -> List[Document]:
         """
         Decode base64 PDF and extract text per page.
         
@@ -115,15 +115,15 @@ class PDFReader:
         try:
             # Decode base64
             pdf_bytes = base64.b64decode(base64_content)
-            return self._load_pdf_bytes(pdf_bytes, bot_id)
+            return self._load_pdf_bytes(pdf_bytes, bot_id, api_key=api_key)
             
         except Exception as e:
             raise ValueError(f"Failed to parse PDF: {str(e)}")
 
-    def load_bytes(self, pdf_bytes: bytes, bot_id: str) -> List[Document]:
+    def load_bytes(self, pdf_bytes: bytes, bot_id: str, api_key: str | None = None) -> List[Document]:
         """Extract text from raw PDF bytes."""
         try:
-            return self._load_pdf_bytes(pdf_bytes, bot_id)
+            return self._load_pdf_bytes(pdf_bytes, bot_id, api_key=api_key)
         except Exception as e:
             raise ValueError(f"Failed to parse PDF: {str(e)}")
 

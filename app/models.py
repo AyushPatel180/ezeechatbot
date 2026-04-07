@@ -24,6 +24,8 @@ class UploadRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_payload(self):
+        if self.content_type == ContentType.pdf_file:
+            return self
         source_fields = {
             ContentType.text: self.text_content,
             ContentType.website: self.website_url,
@@ -54,6 +56,7 @@ class ChatRequest(BaseModel):
     """Request model for chat endpoint."""
     bot_id: str
     user_message: str = Field(..., min_length=1)
+    session_id: Optional[str] = Field(default=None, min_length=1)
     conversation_history: Optional[List[ChatMessage]] = Field(default_factory=list)
 
 

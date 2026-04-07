@@ -13,7 +13,6 @@ model_list:
       api_key: os.environ/OPENAI_API_KEY
 
 litellm_settings:
-  success_callback: ["langfuse"]
   cache: False
   
 # General settings

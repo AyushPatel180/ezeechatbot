@@ -1,4 +1,6 @@
 """Optional multimodal page extraction for charts, formulas, and image-heavy PDF pages."""
+from __future__ import annotations
+
 import base64
 import io
 
@@ -20,7 +22,7 @@ Do not invent unreadable details. If something is unclear, say it is unclear.
 Output plain text only."""
 
 
-def extract_page_with_vision(page) -> str:
+def extract_page_with_vision(page, api_key: str | None = None) -> str:
     """Extract structured text from an image-heavy PDF page via a vision model."""
     if not settings.PDF_VISION_ENABLED:
         return ""
@@ -31,12 +33,10 @@ def extract_page_with_vision(page) -> str:
     image.save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-    response = litellm.completion(
-        model=f"openai/{settings.PDF_VISION_MODEL}",
-        api_base=settings.LITELLM_PROXY_URL,
-        api_key="sk-fake-key",
-        timeout=settings.PDF_VISION_TIMEOUT_SEC,
-        messages=[
+    request_kwargs = {
+        "model": f"openai/{settings.PDF_VISION_MODEL}",
+        "timeout": settings.PDF_VISION_TIMEOUT_SEC,
+        "messages": [
             {
                 "role": "user",
                 "content": [
@@ -48,7 +48,17 @@ def extract_page_with_vision(page) -> str:
                 ],
             }
         ],
-        max_tokens=500,
-        temperature=0.0,
+        "max_tokens": 500,
+        "temperature": 0.0,
+    }
+
+    if api_key:
+        request_kwargs["api_key"] = api_key
+    else:
+        request_kwargs["api_base"] = settings.LITELLM_PROXY_URL
+        request_kwargs["api_key"] = "sk-fake-key"
+
+    response = litellm.completion(
+        **request_kwargs,
     )
     return (response.choices[0].message.content or "").strip()

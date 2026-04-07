@@ -269,7 +269,8 @@ The Docker image includes the `tesseract-ocr` system package, so OCR for scanned
 
 Services:
 
-- API: `http://localhost:8000`
+- API: `http://localhost:8001`
+- Streamlit UI: `http://localhost:8501`
 - Qdrant: `http://localhost:6333`
 - LiteLLM Proxy: `http://localhost:4000`
 
@@ -283,7 +284,21 @@ docker compose down
 
 If you want a cleaner user interface than Swagger, a separate Streamlit app is included in [streamlit_app.py](/Users/ayushpatel/Documents/taska/ezeechatbot/streamlit_app.py).
 
-Install the UI dependencies:
+If you are using Docker, the Streamlit UI is included automatically:
+
+```bash
+docker compose up -d --build
+```
+
+Then open:
+
+```bash
+http://localhost:8501
+```
+
+The Docker API is exposed on `http://localhost:8001` by default so EzeeChatBot can run alongside RapidSales on `8000`. Override it with `API_HOST_PORT` in [`.env`](/Users/ayushpatel/Documents/taska/ezeechatbot/ezeechatbot/.env) if you want a different host port.
+
+If you want to run Streamlit locally without Docker, install the UI dependencies:
 
 ```bash
 pip install -r requirements-streamlit.txt
@@ -301,8 +316,14 @@ The Streamlit app lets users:
 - paste a website URL
 - paste a direct PDF URL
 - upload a PDF file
-- chat with the returned `bot_id`
+- create multi-turn chat sessions with a visible `session_id`
+- keep per-session conversation history and send it back as `conversation_history`
+- attach a `bot_id` to each session and keep chatting without re-pasting the full context
+- optionally enter an OpenAI API key override from the sidebar
+- use the backend env key / LiteLLM proxy path automatically when no override is entered
 - inspect bot stats
+
+For direct API clients, the same request-scoped override is supported with the `X-OpenAI-API-Key` header on `/upload` and `/chat`.
 
 ## API Reference
 

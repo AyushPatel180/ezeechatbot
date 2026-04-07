@@ -1,9 +1,11 @@
 services:
   qdrant:
     image: qdrant/qdrant:latest
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "${QDRANT_HOST_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_HOST_PORT:-6334}:6334"
     volumes:
       - qdrant_storage:/qdrant/storage
     healthcheck:
@@ -16,9 +18,10 @@ services:
   litellm-proxy:
     image: ghcr.io/berriai/litellm:main-latest
     ports:
-      - "4000:4000"
+      - "${LITELLM_HOST_PORT:-4000}:4000"
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-http://host.docker.internal:3000}
@@ -35,7 +38,7 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "${API_HOST_PORT:-8001}:8000"
     environment:
       QDRANT_URL: http://qdrant:6333
       LOG_FILE_PATH: "/app/logs/ezeechatbot.log"
@@ -61,13 +64,28 @@ services:
       LANGFUSE_HOST: ${LANGFUSE_HOST:-http://host.docker.internal:3000}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
+      - ./:/app
       - api_data:/data
-      - ./logs:/app/logs
     depends_on:
       qdrant:
         condition: service_healthy
       litellm-proxy:
         condition: service_healthy
+    restart: on-failure
+
+  streamlit:
+    build: .
+    command: streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port 8501
+    ports:
+      - "${STREAMLIT_HOST_PORT:-8501}:8501"
+    environment:
+      API_BASE_URL: http://api:8000
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+    volumes:
+      - ./:/app
+    depends_on:
+      api:
+        condition: service_started
     restart: on-failure
 
 volumes:

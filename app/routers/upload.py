@@ -1,13 +1,17 @@
 """Upload router for knowledge base ingestion."""
 import base64
 import json
+import mimetypes
+import urllib.request
 import uuid
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from pydantic import ValidationError
+from llama_index.core.schema import Document
 
+from app.core.llama_settings import temporary_llama_settings
 from app.models import ContentType, UploadRequest, UploadResponse
 from app.services.ingestion.pdf_reader import pdf_reader
 from app.services.ingestion.url_reader import url_reader
@@ -70,20 +74,92 @@ def _build_upload_request_from_body(body: dict) -> UploadRequest:
         raise HTTPException(422, detail) from exc
 
 
-async def _load_pdf_from_url(pdf_url: str, bot_id: str):
+async def _load_pdf_from_url(pdf_url: str, bot_id: str, api_key: str | None = None):
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+        ),
+        "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+    }
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=45.0,
+            follow_redirects=True,
+            http2=False,
+            headers=headers,
+        ) as client:
             response = await client.get(pdf_url)
             response.raise_for_status()
+            pdf_bytes = response.content
+            response_headers = response.headers
     except httpx.HTTPStatusError as exc:
         raise ValueError(f"HTTP error fetching PDF URL: {exc.response.status_code}") from exc
     except httpx.RequestError as exc:
-        raise ValueError(f"Request error fetching PDF URL: {str(exc)}") from exc
+        try:
+            req = urllib.request.Request(pdf_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=45) as response:
+                pdf_bytes = response.read()
+                response_headers = getattr(response, "headers", {})
+        except Exception as fallback_exc:
+            extracted_text = await _load_pdf_text_via_reader_proxy(pdf_url, bot_id)
+            if extracted_text:
+                return extracted_text
+            raise ValueError(
+                "Request error fetching PDF URL: "
+                f"{str(exc)}. If the backend container cannot reach this host, "
+                "try the PDF file upload option."
+            ) from fallback_exc
 
-    pdf_bytes = response.content
     if not pdf_bytes:
         raise ValueError("Downloaded PDF is empty")
-    return pdf_reader.load_bytes(pdf_bytes, bot_id)
+    content_type = ""
+    if response_headers:
+        content_type = response_headers.get("content-type", "")
+    guessed_type, _ = mimetypes.guess_type(pdf_url)
+    if content_type and "pdf" not in content_type.lower() and guessed_type != "application/pdf":
+        if not pdf_bytes.startswith(b"%PDF"):
+            raise ValueError("Downloaded URL does not appear to be a valid PDF file")
+    return pdf_reader.load_bytes(pdf_bytes, bot_id, api_key=api_key)
+
+
+async def _load_pdf_text_via_reader_proxy(pdf_url: str, bot_id: str):
+    """Fallback for environments that cannot fetch the PDF binary directly.
+
+    Some public PDF hosts are unreachable from restricted container networks.
+    As a last resort, ask the reader proxy for extracted text and index that.
+    """
+    sanitized_url = pdf_url.removeprefix("https://").removeprefix("http://")
+    reader_url = f"https://r.jina.ai/http://{sanitized_url}"
+    try:
+        async with httpx.AsyncClient(
+            timeout=45.0,
+            follow_redirects=True,
+            http2=False,
+            headers={"User-Agent": "Mozilla/5.0"},
+        ) as client:
+            response = await client.get(reader_url)
+            response.raise_for_status()
+    except Exception:
+        return None
+
+    text = response.text.strip()
+    if len(text) < 80:
+        return None
+
+    document = Document(
+        text=text,
+        metadata={
+            "bot_id": bot_id,
+            "source_type": "pdf_url_text_fallback",
+            "source_url": pdf_url,
+            "extraction_method": "reader_proxy",
+        },
+    )
+    document.excluded_embed_metadata_keys = ["bot_id"]
+    return [document]
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -99,6 +175,7 @@ async def upload_knowledge_base(
     pdf_file: Optional[UploadFile] = File(None, description="Upload a PDF file here."),
     metadata_json: str = Form("{}", description="Optional JSON metadata."),
     req: Request = None,
+    x_openai_api_key: Optional[str] = Header(default=None, alias="X-OpenAI-API-Key"),
 ):
     """
     Upload a knowledge base (PDF file, URL, or plain text).
@@ -116,10 +193,12 @@ async def upload_knowledge_base(
     client_ip = req.client.host if req.client else None
 
     upload_request: Optional[UploadRequest] = None
+    request_api_key = x_openai_api_key
     if req.headers.get("content-type", "").startswith("application/json"):
         body = await req.json()
         upload_request = _build_upload_request_from_body(body)
         metadata_dict = upload_request.metadata or {}
+        request_api_key = request_api_key or body.get("api_key")
     else:
         form = await req.form()
         raw_source_type = source_type or form.get("content_type")
@@ -144,6 +223,7 @@ async def upload_knowledge_base(
         except ValidationError as exc:
             detail = exc.errors()[0].get("msg", "Invalid form payload")
             raise HTTPException(422, detail) from exc
+        request_api_key = request_api_key or form.get("api_key")
 
     source_type_value = upload_request.content_type.value if upload_request else source_type
 
@@ -151,39 +231,39 @@ async def upload_knowledge_base(
     logger.debug(f"[UPLOAD] Parsed metadata: {metadata_dict}")
     
     try:
-        # Load documents based on content type
-        logger.info(f"[UPLOAD] Loading documents from source (type={source_type_value})...")
-        match upload_request.content_type:
-            case ContentType.website:
-                documents = await url_reader.load(upload_request.website_url, bot_id)
-            case ContentType.pdf_url:
-                documents = await _load_pdf_from_url(upload_request.pdf_url, bot_id)
-            case ContentType.pdf_base64:
-                documents = pdf_reader.load(upload_request.pdf_base64_content, bot_id)
-            case ContentType.pdf_file:
-                uploaded_pdf = pdf_file or form.get("file")
-                if not uploaded_pdf:
-                    raise HTTPException(422, "file is required for pdf_file type")
-                logger.info(f"[UPLOAD] Reading PDF file: {uploaded_pdf.filename} ({uploaded_pdf.size if hasattr(uploaded_pdf, 'size') else 'unknown'} bytes)")
-                # Read file content and encode as base64
-                file_content = await uploaded_pdf.read()
-                logger.info(f"[UPLOAD] PDF loaded: {len(file_content)} bytes")
-                documents = pdf_reader.load_bytes(file_content, bot_id)
-            case ContentType.text:
-                documents = text_reader.load(upload_request.text_content, bot_id)
-            case _:
-                logger.error("invalid_content_type", content_type=source_type_value, bot_id=bot_id)
-                raise HTTPException(400, f"Unsupported content type: {source_type_value}")
-        
-        if not documents:
-            logger.warning("no_extractable_content", bot_id=bot_id, content_type=content_type)
-            raise NoExtractableContentError("No extractable content found in source.")
-        
-        logger.info(f"[UPLOAD] Documents loaded: {len(documents)} document(s) extracted")
-        
-        # Process through ingestion pipeline
-        logger.info(f"[UPLOAD] Starting ingestion pipeline...")
-        result = await ingest_documents(bot_id=bot_id, documents=documents)
+        async with temporary_llama_settings(request_api_key):
+            # Load documents based on content type
+            logger.info(f"[UPLOAD] Loading documents from source (type={source_type_value})...")
+            match upload_request.content_type:
+                case ContentType.website:
+                    documents = await url_reader.load(upload_request.website_url, bot_id)
+                case ContentType.pdf_url:
+                    documents = await _load_pdf_from_url(upload_request.pdf_url, bot_id, api_key=request_api_key)
+                case ContentType.pdf_base64:
+                    documents = pdf_reader.load(upload_request.pdf_base64_content, bot_id, api_key=request_api_key)
+                case ContentType.pdf_file:
+                    uploaded_pdf = pdf_file or form.get("file")
+                    if not uploaded_pdf:
+                        raise HTTPException(422, "file is required for pdf_file type")
+                    logger.info(f"[UPLOAD] Reading PDF file: {uploaded_pdf.filename} ({uploaded_pdf.size if hasattr(uploaded_pdf, 'size') else 'unknown'} bytes)")
+                    file_content = await uploaded_pdf.read()
+                    logger.info(f"[UPLOAD] PDF loaded: {len(file_content)} bytes")
+                    documents = pdf_reader.load_bytes(file_content, bot_id, api_key=request_api_key)
+                case ContentType.text:
+                    documents = text_reader.load(upload_request.text_content, bot_id)
+                case _:
+                    logger.error("invalid_content_type", content_type=source_type_value, bot_id=bot_id)
+                    raise HTTPException(400, f"Unsupported content type: {source_type_value}")
+
+            if not documents:
+                logger.warning("no_extractable_content", bot_id=bot_id, content_type=source_type_value)
+                raise NoExtractableContentError("No extractable content found in source.")
+
+            logger.info(f"[UPLOAD] Documents loaded: {len(documents)} document(s) extracted")
+
+            # Process through ingestion pipeline
+            logger.info(f"[UPLOAD] Starting ingestion pipeline...")
+            result = await ingest_documents(bot_id=bot_id, documents=documents)
         
         if result.node_count == 0:
             logger.warning(f"[UPLOAD] No chunks created - content too short")
